@@ -1,10 +1,21 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:io';
 
 import 'package:blurhash_ffi/blurhash_ffi.dart';
+import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await _initBlurhashCache();
   runApp(const MyApp());
+}
+
+Future<void> _initBlurhashCache() async {
+  final temporaryDirectory = await getTemporaryDirectory();
+  final cacheDirectory = Directory(p.join(temporaryDirectory.path, 'blurhash_cache'));
+  BlurhashFFI.setCacheDirectory(cacheDirectory);
 }
 
 class MyApp extends StatefulWidget {
@@ -39,9 +50,7 @@ class _MyAppState extends State<MyApp> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [1, 2, 3].map<Widget>((e) {
-                    var assetName = e == 1
-                        ? 'assets/images/$e.jpg'
-                        : 'assets/images/$e.png';
+                    var assetName = e == 1 ? 'assets/images/$e.jpg' : 'assets/images/$e.png';
                     return MaterialButton(
                       padding: EdgeInsets.zero,
                       onPressed: () async {
@@ -64,9 +73,7 @@ class _MyAppState extends State<MyApp> {
                     padding: const EdgeInsets.all(8.0),
                     child: FutureBuilder(
                       future: blurHashResult,
-                      builder: (context, snapshot) => snapshot.hasData
-                          ? Text('blurhash: ${snapshot.data}')
-                          : const CircularProgressIndicator(),
+                      builder: (context, snapshot) => snapshot.hasData ? Text('blurhash: ${snapshot.data}') : const CircularProgressIndicator(),
                     ),
                   ),
                 if (blurHashResult != null)
@@ -86,18 +93,11 @@ class _MyAppState extends State<MyApp> {
                                 imageFit: BoxFit.cover,
                                 color: Colors.grey,
                                 onReady: () => debugPrint('Blurhash ready'),
-                                onDisplayed: () =>
-                                    debugPrint('Blurhash displayed'),
-                                errorBuilder: (context, error, stackTrace) =>
-                                    Container(
-                                        color: Colors.red,
-                                        child: const Center(
-                                            child: Text('Error',
-                                                style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 20,
-                                                    fontWeight:
-                                                        FontWeight.bold)))),
+                                onDisplayed: () => debugPrint('Blurhash displayed'),
+                                errorBuilder: (context, error, stackTrace) => Container(
+                                    color: Colors.red,
+                                    child:
+                                        const Center(child: Text('Error', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)))),
                               );
                             }
                             return const Center(
@@ -118,8 +118,7 @@ class _MyAppState extends State<MyApp> {
 class ImageSelect extends StatelessWidget {
   final ImageProvider imageProvider;
   final bool isSelected;
-  const ImageSelect(
-      {super.key, required this.imageProvider, this.isSelected = false});
+  const ImageSelect({super.key, required this.imageProvider, this.isSelected = false});
 
   @override
   Widget build(BuildContext context) {

@@ -5,6 +5,8 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:ui' as ui;
+
+import 'package:blurhash_ffi/blurhash_cache.dart';
 import 'package:blurhash_ffi/uiImage.dart';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -18,8 +20,7 @@ const String _libName = 'blurhash_ffi';
 final Logger _log = Logger('blurhash_ffi');
 
 void configureLogger() {
-  Logger.root.level =
-      Level.ALL; // Set the log level (You can adjust this as needed)
+  Logger.root.level = Level.ALL; // Set the log level (You can adjust this as needed)
 
   Logger.root.onRecord.listen((record) {
     // Define ANSI escape code sequences for different log levels and colors
@@ -39,8 +40,7 @@ void configureLogger() {
     final String colorCode = colorMap[record.level] ?? '';
 
     // You can customize the log message format here, including color
-    debugPrint(
-        '$colorCode${record.level.name}: ${record.time}: ${record.message}$colorReset');
+    debugPrint('$colorCode${record.level.name}: ${record.time}: ${record.message}$colorReset');
   });
 }
 
@@ -48,6 +48,8 @@ void configureLogger() {
 class BlurhashFFI {
   // singleton class
   static final BlurhashFFI _instance = BlurhashFFI._internal();
+
+  BlurhashCache? _cache;
 
   // Logger
   bool _isInitialized = false;
@@ -70,8 +72,12 @@ class BlurhashFFI {
 
   static void free() => _instance._free();
 
-  static bool isValidBlurHash(String blurHash) =>
-      _instance._isValidBlurHash(blurHash);
+  static void setCacheDirectory(Directory cacheDirectory) {
+    cacheDirectory.createSync(recursive: true);
+    _instance._cache = BlurhashCache(cacheDirectory);
+  }
+
+  static bool isValidBlurHash(String blurHash) => _instance._isValidBlurHash(blurHash);
 
   final List<Isolate> _helperIsolates = <Isolate>[];
 
@@ -81,12 +87,10 @@ class BlurhashFFI {
     int componentY = 3,
   }) async {
     try {
-      final BlurHashImageInfo info =
-          await _instance._getImageInfoFromImageProvider(imageProvider);
+      final BlurHashImageInfo info = await _instance._getImageInfoFromImageProvider(imageProvider);
       return _instance._encodeBlurHash(info, componentX, componentY);
     } catch (e) {
-      throw BlurhashFFIException(
-          'Could not encode Image', StackTrace.current, e);
+      throw BlurhashFFIException('Could not encode Image', StackTrace.current, e);
     }
   }
 
@@ -99,8 +103,7 @@ class BlurhashFFI {
     try {
       return _instance._blurHashDecodeImage(blurhash, width, height, punch);
     } catch (e) {
-      throw BlurhashFFIException(
-          'Could not decode Image', StackTrace.current, e);
+      throw BlurhashFFIException('Could not decode Image', StackTrace.current, e);
     }
   }
 
@@ -129,18 +132,15 @@ class BlurhashFFI {
 
   // encode requests
   int _nextEncodeRequestId = 0;
-  final Map<int, Completer<String>> _encodeRequests =
-      <int, Completer<String>>{};
+  final Map<int, Completer<String>> _encodeRequests = <int, Completer<String>>{};
 
   // decode requests
   int _nextDecodeRequestId = 0;
-  final Map<int, Completer<Uint8List>> _decodeRequests =
-      <int, Completer<Uint8List>>{};
+  final Map<int, Completer<Uint8List>> _decodeRequests = <int, Completer<Uint8List>>{};
 
   // decode to array requests
   int _nextDecodeToArrayRequestId = 0;
-  final Map<int, Completer<int>> _decodeToArrayRequests =
-      <int, Completer<int>>{};
+  final Map<int, Completer<int>> _decodeToArrayRequests = <int, Completer<int>>{};
 
   /// Encoder A longer lived native function, which occupies the thread calling it.
   ///
@@ -148,48 +148,42 @@ class BlurhashFFI {
   ///     `info` - The image info
   ///     `componentX` - The number of components in the X direction. Must be between 1 and 9. 3 to 5 is usually a good range for this.
   ///     `componentY` - The number of components in the Y direction. Must be between 1 and 9. 3 to 5 is usually a good range for this.
-  Future<String> _encodeBlurHash(BlurHashImageInfo info,
-      [int componentX = 4, int componentY = 3]) async {
+  Future<String> _encodeBlurHash(BlurHashImageInfo info, [int componentX = 4, int componentY = 3]) async {
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextEncodeRequestId++;
-    final _EncodeRequest request = _EncodeRequest(requestId, info.rgbBytes,
-        info.width, info.height, componentX, componentY, info.rowStride);
+    final _EncodeRequest request = _EncodeRequest(requestId, info.rgbBytes, info.width, info.height, componentX, componentY, info.rowStride);
     final Completer<String> completer = Completer<String>();
     _encodeRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
     return completer.future;
   }
 
-  Future<Uint8List> _decodeBlurHash(
-      String blurHash, int width, int height, int punch, int channels) async {
+  Future<Uint8List> _decodeBlurHash(String blurHash, int width, int height, int punch, int channels) async {
+    final cacheFile = _cache?.getCacheFile(blurHash, width, height, punch, channels);
+    if (cacheFile != null && await cacheFile.exists()) {
+      return cacheFile.readAsBytes();
+    }
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
     final int requestId = _nextDecodeRequestId++;
-    final _DecodeRequest request =
-        _DecodeRequest(requestId, blurHash, width, height, punch, channels);
+    final _DecodeRequest request = _DecodeRequest(requestId, blurHash, width, height, punch, channels, cacheFile);
     final Completer<Uint8List> completer = Completer<Uint8List>();
     _decodeRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
     return completer.future;
   }
 
-  Future<BlurHashImageInfo> _getImageInfoFromImageProvider(
-      ImageProvider imageProvider) async {
+  Future<BlurHashImageInfo> _getImageInfoFromImageProvider(ImageProvider imageProvider) async {
     final completer = Completer<BlurHashImageInfo>();
     final listener = ImageStreamListener((imageInfo, _) async {
-      final ByteData? bytes =
-          await imageInfo.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final ByteData? bytes = await imageInfo.image.toByteData(format: ui.ImageByteFormat.rawRgba);
       if (bytes == null) {
-        completer.completeError(BlurhashFFIException(
-            'Could not decode Image from Image provider',
-            StackTrace.current,
-            null));
+        completer.completeError(BlurhashFFIException('Could not decode Image from Image provider', StackTrace.current, null));
         return;
       }
       final Uint8List list = bytes.buffer.asUint8List();
 
       if (!completer.isCompleted) {
-        completer.complete(BlurHashImageInfo(imageInfo.image.height,
-            imageInfo.image.width, imageInfo.image.width * 4, list));
+        completer.complete(BlurHashImageInfo(imageInfo.image.height, imageInfo.image.width, imageInfo.image.width * 4, list));
       }
     }, onError: (dynamic exception, StackTrace? stackTrace) {
       completer.completeError(exception, stackTrace);
@@ -202,9 +196,8 @@ class BlurhashFFI {
     return completer.future;
   }
 
-  Future<ui.Image> _blurHashDecodeImage(
-      String hash, int width, int height, int punch) async {
-    _validateBlurhash(hash);
+  Future<ui.Image> _blurHashDecodeImage(String hash, int width, int height, int punch) async {
+    assert(_isValidBlurHash(hash), 'Invalid blurhash');
 
     final completer = Completer<ui.Image>();
     final pixels = await _decodeBlurHash(hash, width, height, punch, 4);
@@ -212,8 +205,7 @@ class BlurhashFFI {
       // https://github.com/flutter/flutter/issues/45190
       completer.complete(_createBmp(pixels, width, height, 4));
     } else {
-      ui.decodeImageFromPixels(
-          pixels, width, height, ui.PixelFormat.rgba8888, completer.complete);
+      ui.decodeImageFromPixels(pixels, width, height, ui.PixelFormat.rgba8888, completer.complete);
     }
 
     return completer.future;
@@ -244,16 +236,14 @@ class BlurhashFFI {
     final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
 
     final int requestId = _nextDecodeToArrayRequestId++;
-    final _DecodeToArrayRequest request = _DecodeToArrayRequest(
-        requestId, blurHash, width, height, punch, channels, pixelArray);
+    final _DecodeToArrayRequest request = _DecodeToArrayRequest(requestId, blurHash, width, height, punch, channels, pixelArray);
     final Completer<int> completer = Completer<int>();
     _decodeToArrayRequests[requestId] = completer;
     helperIsolateSendPort.send(request);
     return completer.future;
   }
 
-  late final Future<SendPort> _helperIsolateSendPort =
-      _helperIsolateSendPortFunc();
+  late final Future<SendPort> _helperIsolateSendPort = _helperIsolateSendPortFunc();
 
   /// The SendPort belonging to the helper isolate.
   Future<SendPort> _helperIsolateSendPortFunc() async {
@@ -296,27 +286,20 @@ class BlurhashFFI {
     final ReceivePort receivePort = ReceivePort()..listen(onData);
     final ReceivePort errorPort = ReceivePort()
       ..listen((message) {
-        final isolateDebugName =
-            'blurhash_ffi#native#${_helperIsolates.length}';
+        final isolateDebugName = 'blurhash_ffi#native#${_helperIsolates.length}';
         if (message is BlurhashFFIException) {
           switch (message.level) {
             case Level.SEVERE:
-              _log.severe('Error $isolateDebugName: ${message.message}',
-                  message.error, message.stackTrace);
+              _log.severe('Error $isolateDebugName: ${message.message}', message.error, message.stackTrace);
               break;
             case Level.INFO:
-              _log.info('Error $isolateDebugName: ${message.message}',
-                  message.error, message.stackTrace);
+              _log.info('Error $isolateDebugName: ${message.message}', message.error, message.stackTrace);
               break;
             case Level.WARNING:
-              _log.warning('Error $isolateDebugName: ${message.message}',
-                  message.error, message.stackTrace);
+              _log.warning('Error $isolateDebugName: ${message.message}', message.error, message.stackTrace);
               break;
             default:
-              _log.shout(
-                  'Error ${message.level} $isolateDebugName: ${message.message}',
-                  message.error,
-                  message.stackTrace);
+              _log.shout('Error ${message.level} $isolateDebugName: ${message.message}', message.error, message.stackTrace);
           }
         } else {
           _log.shout('Error $isolateDebugName: $message');
@@ -352,49 +335,38 @@ class BlurhashFFI {
             data.rowStride,
           );
           final String resultString = result.cast<Utf8>().toDartString();
-          final _EncodeResponse response =
-              _EncodeResponse(data.id, resultString);
+          final _EncodeResponse response = _EncodeResponse(data.id, resultString);
           sendPort.send(response);
           return;
         } else if (data is _DecodeRequest) {
-          final Pointer<Uint8> result = _bindings.decode(data.blurHashPointer,
-              data.width, data.height, data.punch, data.channels);
+          final Pointer<Uint8> result = _bindings.decode(data.blurHashPointer, data.width, data.height, data.punch, data.channels);
           final Uint8List resultImage = result.asTypedList(
             data.width * data.height * data.channels,
             // preffer way but works only from dart 3.1.0, and requre to change generated bindings
             // finalizer: _bindings.freePixelArrayPtr.cast(),
           );
-          final _DecodeResponse response = _DecodeResponse(
-            data.id,
-            // copy image data to prevent 'use after free' error
-            Uint8List.fromList(resultImage),
-          );
-          // free c side memory
-          _bindings.freePixelArray(result);
+
+          final responsePixels = Uint8List.fromList(resultImage); // copy image data to prevent 'use after free' error
+          final _DecodeResponse response = _DecodeResponse(data.id, responsePixels);
           sendPort.send(response);
+
+          final cacheFile = data.cacheFile;
+          if (cacheFile != null) {
+            cacheFile.writeAsBytes(responsePixels).ignore(); // write image to cache
+          }
+          _bindings.freePixelArray(result); // free c side memory
           return;
         } else if (data is _DecodeToArrayRequest) {
-          final int result = _bindings.decodeToArray(
-              data.blurHashPointer,
-              data.width,
-              data.height,
-              data.punch,
-              data.channels,
-              data.pixelArray);
+          final int result = _bindings.decodeToArray(data.blurHashPointer, data.width, data.height, data.punch, data.channels, data.pixelArray);
           data.free();
-          final _DecodeToArrayResponse response =
-              _DecodeToArrayResponse(data.id, result);
+          final _DecodeToArrayResponse response = _DecodeToArrayResponse(data.id, result);
           sendPort.send(response);
           return;
         }
-        throw BlurhashFFIException(
-            'EXCEPTION: Unsupported message type: ${data.runtimeType}',
-            null,
-            null);
+        throw BlurhashFFIException('EXCEPTION: Unsupported message type: ${data.runtimeType}', null, null);
       } catch (e) {
         final stackTrace = StackTrace.current;
-        throw BlurhashFFIException(
-            'ERORR: ${Isolate.current.debugName}', stackTrace, e);
+        throw BlurhashFFIException('ERORR: ${Isolate.current.debugName}', stackTrace, e);
       }
     }
 
@@ -412,8 +384,7 @@ class BlurhashFFIException extends Error {
   final StackTrace? stackTrace;
   final Object? error;
 
-  BlurhashFFIException(this.message, this.stackTrace, this.error,
-      [this.level = Level.SEVERE]);
+  BlurhashFFIException(this.message, this.stackTrace, this.error, [this.level = Level.SEVERE]);
 }
 
 mixin Freeable {
@@ -430,8 +401,7 @@ class _DecodeToArrayRequest with Freeable {
   final Pointer<Uint8> pixelArray;
   Pointer<Utf8>? _bhptr;
 
-  _DecodeToArrayRequest(this.id, this.blurHash, this.width, this.height,
-      this.punch, this.channels, this.pixelArray);
+  _DecodeToArrayRequest(this.id, this.blurHash, this.width, this.height, this.punch, this.channels, this.pixelArray);
 
   Pointer<Char> get blurHashPointer {
     if (_bhptr != null) {
@@ -457,10 +427,10 @@ class _DecodeRequest with Freeable {
   final int height;
   final int punch;
   final int channels;
+  final File? cacheFile;
   Pointer<Utf8>? _bhptr;
 
-  _DecodeRequest(this.id, this.blurHash, this.width, this.height, this.punch,
-      this.channels);
+  _DecodeRequest(this.id, this.blurHash, this.width, this.height, this.punch, this.channels, this.cacheFile);
 
   Pointer<Char> get blurHashPointer {
     if (_bhptr == null) {
@@ -489,8 +459,7 @@ class _EncodeRequest with Freeable {
   final int rowStride;
   Pointer<Uint8>? pixelsPtr;
 
-  _EncodeRequest(this.id, this.pixels, this.width, this.height, this.componentX,
-      this.componentY, this.rowStride);
+  _EncodeRequest(this.id, this.pixels, this.width, this.height, this.componentX, this.componentY, this.rowStride);
 
   Pointer<Uint8> get pixelsPointer {
     if (pixelsPtr == null) {
@@ -545,8 +514,7 @@ class BlurHashImageInfo {
   int get numChannels => rowStride ~/ width;
 }
 
-Future<ui.Image> _createBmp(
-    Uint8List pixels, int width, int height, int channels) async {
+Future<ui.Image> _createBmp(Uint8List pixels, int width, int height, int channels) async {
   int size = (width * height * channels) + 122;
   final bmp = Uint8List(size);
   final ByteData header = bmp.buffer.asByteData();
